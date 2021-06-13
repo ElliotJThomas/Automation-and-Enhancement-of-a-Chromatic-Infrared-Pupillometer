@@ -3,6 +3,8 @@ An Undergraduate Honors Thesis to fulfill the requirements of the Bachelor of Me
 
 ## Author
 Elliot Thomas  
+
+##Acknowledgments
 Thank you Associate Professor Sally McFadden and Associate Professor Shamus Smith for your guidance in this project.  
 Thank you to Vision Sciences Lab for your input into this project.  
 
