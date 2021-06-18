@@ -57,7 +57,7 @@ class UserInterface:
       self.question_analysis_type=tk.Label(self.frame, text="What type of Analysis?").grid(row=0,column=0,columnspan=3)
       tk.Radiobutton(self.frame, text="Pupil Response", variable = self.var_analysis_type, value='PR').grid(row=1,column=0)
       tk.Radiobutton(self.frame, text="PIPR", variable = self.var_analysis_type, value='PIPR').grid(row=1,column=1)    
-      tk.Radiobutton(self.frame, text="Corneal Topography", variable = self.var_analysis_type, value='CT').grid(row=1,column=2)
+      tk.Radiobutton(self.frame, text="Keratometry", variable = self.var_analysis_type, value='CT').grid(row=1,column=2) #CT for corneal topography
 
       self.spacing_one=tk.Label(self.frame, text="").grid(row=2,column=0)
 

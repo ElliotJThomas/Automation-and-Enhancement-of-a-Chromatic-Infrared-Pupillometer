@@ -57,6 +57,7 @@ class ThreadedClient:
       self.video_to_frames_active=False
       self.results_analysis_active = False   
       self.imageNumber=0
+      self.fps=constants.FRAME_RATE
       # Create the queue
       self.out_queue = queue.Queue()
       self.in_queue = queue.Queue()
@@ -74,7 +75,7 @@ class ThreadedClient:
       self.threads['thread3'] = threading.Thread(target=self.video_to_frames_thread)
 
       self.threads['thread4'] = threading.Thread(target=self.results_analysis_thread)
-      
+          
       # Start the worker threads
       for thread in self.threads:
          self.threads[thread].daemon = True
@@ -128,7 +129,7 @@ class ThreadedClient:
                             run("Analyze Particles...", "size=10000-Infinity circularity=0.20-Infinity exclude");"""
                self.ij.py.run_macro(macro_measure_image)
                prog = 100*(i-(self.imageNumber-15))/self.total_number_images
-               self.out_queue.put("progress:" + str(msg))
+               self.out_queue.put("progress:" + str(prog))
             
             #Save measurements from imageJ
             outputPath=self.output_directory+"/All_Results_Raw.csv"
@@ -161,340 +162,20 @@ class ThreadedClient:
             self.ij.py.run_macro(macro_measure_image)
             
             #Save imageJ results
-            kerIJResultsPath = self.output_directory+"/Ker_Results.csv"
-            macro_finish = """saveAs("Results",'"""+kerIJResultsPath+"');"
+            self.kerIJResultsPath = self.output_directory+"/Ker_Results.csv"
+            macro_finish = """saveAs("Results",'"""+self.kerIJResultsPath+"');"
             self.ij.py.run_macro(macro_finish)
             
-            #Find centre of keratometer and assign a new coordinate system based off this centre
-            data = pd.read_csv(kerIJResultsPath)
-            x=data['X'].astype(float)
-            y=data['Y'].astype(float)
-            x_centre=x.mean()
-            y_centre=y.mean()
-            x_coord=x-x_centre
-            y_coord=y-y_centre
+            self.image_analysis_active = False
+            self.image_analysis_complete = True
+            self.results_analysis_active=True
+
             
-            #Find angle from new origin
-            ratio=abs(y_coord)/abs(x_coord)
-            angle = pd.Series(ratio).apply(lambda x: math.atan(x)*180/math.pi)
-
-            #Adjust angle to 0 to 360
-            for i in range (0,len(x)):
-               if x_coord[i]>=0 and y_coord[i]<0:
-                        angle[i]=360-angle[i]
-               if x_coord[i]<0:
-                     if y_coord[i]<0:
-                        angle[i]=180+angle[i]
-                     elif y_coord[i]>0:
-                        angle[i]=180-angle[i]
-
-            #Find distances from centre
-            x_coord_sq= pd.Series(x_coord).apply(lambda x: x**2)
-            y_coord_sq= pd.Series(y_coord).apply(lambda x: x**2)
-            dist_sq=x_coord_sq+y_coord_sq
-            dist= pd.Series(dist_sq).apply(lambda x: x**0.5)
-
-            #Drop uneeded data from results
-            try:
-               data.drop(['Label','Area', 'Major', 'Minor', 'Angle'], axis = 1, inplace = True)
-            except:
-               pass
-            data["Distance"]=dist
-            data["Ker Angle"]=angle
-            data = data.sort_values(by=['Ker Angle','Distance'])
-            data.to_csv(kerIJResultsPath,index=False)
-            data = pd.read_csv(kerIJResultsPath)
-            kerAngle=data["Ker Angle"]
-   
-            #Group by angle
-            average=0
-            total = 0
-            count=0
-            angleGroup=[0]*len(x)
-            angleGroupNumber=1
-            for i in range (0,len(x)):
-               total+=kerAngle[i]
-               count+=1
-               average=total/count
-               if abs(kerAngle[i]-average)>10:
-                     total=kerAngle[i]
-                     count=1
-                     angleGroupNumber+=1
-                     angleGroup[i]=angleGroupNumber   
-               else:
-                  angleGroup[i]=angleGroupNumber    
-            
-            data['Angle Group']=angleGroup
-            data = data.sort_values(by=['Angle Group','Distance'])
-            data.to_csv(kerIJResultsPath,index=False)
-            data = pd.read_csv(kerIJResultsPath)
-
-            #Remove close data points that are at same approximate angle
-            for i in range (1,len(x)):
-               if abs(data['Distance'][i]-data['Distance'][i-1])<5:
-                  data['Distance'][i-1]=np.nan
-
-            #Sort by distance
-            data = data.sort_values(by=['Distance'])
-            data=data.dropna(0)
-            data.to_csv(kerIJResultsPath,index=False)
-            data = pd.read_csv(kerIJResultsPath)
-            points= (np.array(data["Distance"])).reshape(-1, 1)
-
-            #Cluster data to form 7 groups
-            kmeans= KMeans(init="k-means++",n_clusters=self.kerRings,n_init=20, max_iter=500)
-            kmeans.fit(points)
-            #print(kmeans.labels_)
-            data["Klabels"]=kmeans.labels_
-            data.to_csv(kerIJResultsPath,index=False)
-
-
-            #Rearranges k labels for 1 to 7 (The labels are not in ascendin order after kmeans). Calculates mean radii of each ring. Calculates spot power
-            powerCalcConstants = [[8.6546,6.5952, 5.3263,4.6349,4.0759,3.6618,3.3428],[0.0325,-0.0101,0.0219,0.0071,0.0182,0.0199,0.0134]]
-            num=data["Klabels"][0]
-            label=7
-            meanRadii=[0]*7
-            count=0
-            total=0
-            spotPower=[0]*(data.shape[0])
-            for i in range (0, data.shape[0]):
-               if data["Klabels"][i]!=num:
-                  num = data["Klabels"][i]
-                  label+=1
-
-                  meanRadii[label-8]=total/count
-                  count=0
-                  total=0
-               data["Klabels"][i]=label
-               total+=data["Distance"][i]
-               count+=1
-
-               spotPower[i]=(1.335-1) / ((powerCalcConstants[0][(label-7)] * (data["Distance"][i] / 152.0157) + powerCalcConstants[1][(label-7)])/1000)
-
-            #Calculate last mean radii (not computed in for loop)
-            label+=1
-            meanRadii[label-8]=total/count
-            
-            #Power calculation for keratometer rings based of mean radii
-            powerScaleAdjusted = [i/152.0157 for i in meanRadii]
-            cornealPower=[0]*7
-            cornealPower[0] = (1.335-1) / ((8.6546 * powerScaleAdjusted[0] + 0.0325)/1000)
-            cornealPower[1] = (1.335-1) / ((6.5952 * powerScaleAdjusted[1] - 0.0101)/1000)
-            cornealPower[2] = (1.335-1) / ((5.3263 * powerScaleAdjusted[2] + 0.0219)/1000)
-            cornealPower[3] = (1.335-1) / ((4.6349 * powerScaleAdjusted[3] + 0.0071)/1000)
-            cornealPower[4] = (1.335-1) / ((4.0759 * powerScaleAdjusted[4] + 0.0182)/1000)
-            cornealPower[5] = (1.335-1) / ((3.6618 * powerScaleAdjusted[5] + 0.0199)/1000)
-            cornealPower[6] = (1.335-1) / ((3.3428 * powerScaleAdjusted[6] + 0.0134)/1000)
-            meanPower=np.mean(cornealPower)
-
-            #Convert radii to mm
-            meanRadii = np.array(meanRadii)
-            meanRadii = meanRadii/constants.pupil_scale
-
-            #Edit CSV
-            data["Klabels"]=data["Klabels"]-6
-            data["Power"]=spotPower
-            data.drop(['Angle Group'], axis = 1, inplace = True)
-            data.to_csv(kerIJResultsPath,index=False)
-
-            #Initialise arrays for ellipse points
-            ellipse1_x=[]
-            ellipse1_y=[]
-            ellipse2_x=[]
-            ellipse2_y=[]
-            ellipse3_x=[]
-            ellipse3_y=[]
-            ellipse4_x=[]
-            ellipse4_y=[]
-            ellipse5_y=[]    
-            ellipse5_x=[]
-            ellipse6_y=[]
-            ellipse6_x=[]
-            ellipse7_y=[]
-            ellipse7_x=[]
-
-            #Add x and y coordinates for ellipses (offset by original roi crop)
-            for i in range (0,data.shape[0]):
-               if data['Klabels'][i]==1:
-                     ellipse1_x.append(data['X'][i]+self.roi[0])
-                     ellipse1_y.append(data['Y'][i]+self.roi[1])
-               elif data['Klabels'][i]==2:
-                     ellipse2_x.append(data['X'][i]+self.roi[0])
-                     ellipse2_y.append(data['Y'][i]+self.roi[1])
-               elif data['Klabels'][i]==3:
-                     ellipse3_x.append(data['X'][i]+self.roi[0])
-                     ellipse3_y.append(data['Y'][i]+self.roi[1])
-               elif data['Klabels'][i]==4:
-                     ellipse4_x.append(data['X'][i]+self.roi[0])
-                     ellipse4_y.append(data['Y'][i]+self.roi[1])
-               elif data['Klabels'][i]==5:
-                     ellipse5_x.append(data['X'][i]+self.roi[0])
-                     ellipse5_y.append(data['Y'][i]+self.roi[1])
-               elif data['Klabels'][i]==6:
-                     ellipse6_x.append(data['X'][i]+self.roi[0])
-                     ellipse6_y.append(data['Y'][i]+self.roi[1])
-               elif data['Klabels'][i]==7:
-                     ellipse7_x.append(data['X'][i]+self.roi[0])
-                     ellipse7_y.append(data['Y'][i]+self.roi[1])
-
-
-
-            #Load original images and try to fit and plot 7 ellipses
-            image = cv2.imread(self.fileName)
-            startAngle = 0.
-            endAngle = 360
-            # Red color in BGR
-            color = (0, 0, 255)
-            # Line thickness of 2 px
-            thickness = 2
-            
-            try:
-               ellipse1_param =self.fit_ellipse(np.array(ellipse1_x), np.array(ellipse1_y))
-               e1p_a=(int(ellipse1_param[0]),int(ellipse1_param[1])) #radius ellipse 1 parameters _ axes
-               e1p_c=(int(ellipse1_param[2]),int(ellipse1_param[3])) #centre preadjusted for original image ellipse 1 parameters _ centre
-               e1p_phi=ellipse1_param[4]*180/math.pi   #angle converted to degrees ellipse 1 parameters _ phi
-               image = cv2.ellipse(image, e1p_c, e1p_a, e1p_phi, startAngle, endAngle, color, thickness)
-            except:
-               pass
-            try:
-               ellipse2_param=self.fit_ellipse(np.array(ellipse2_x), np.array(ellipse2_y))
-               e2p_a=(int(ellipse2_param[0]),int(ellipse2_param[1])) #radius
-               e2p_c=(int(ellipse2_param[2]),int(ellipse2_param[3])) #centre preadjusted for original image
-               e2p_phi=ellipse2_param[4]*180/math.pi   #angle converted to degrees
-               image = cv2.ellipse(image, e2p_c, e2p_a, e2p_phi, startAngle, endAngle, color, thickness)   
-            except:
-               pass
-            try:
-               ellipse3_param=self.fit_ellipse(np.array(ellipse3_x), np.array(ellipse3_y))
-               e3p_a=(int(ellipse3_param[0]),int(ellipse3_param[1])) #radius
-               e3p_c=(int(ellipse3_param[2]),int(ellipse3_param[3])) #centre preadjusted for original image
-               e3p_phi=ellipse3_param[4]*180/math.pi   #angle converted to degrees
-               image = cv2.ellipse(image, e3p_c, e3p_a, e3p_phi, startAngle, endAngle, color, thickness)
-            except:
-               pass
-            try:
-               ellipse4_param=self.fit_ellipse(np.array(ellipse4_x), np.array(ellipse4_y))
-               e4p_a=(int(ellipse4_param[0]),int(ellipse4_param[1])) #radius
-               e4p_c=(int(ellipse4_param[2]),int(ellipse4_param[3])) #centre preadjusted for original image
-               e4p_phi=ellipse4_param[4]*180/math.pi   #angle converted to degrees
-               image = cv2.ellipse(image, e4p_c, e4p_a, e4p_phi, startAngle, endAngle, color, thickness)
-            except:
-               pass
-            try:
-               ellipse5_param=self.fit_ellipse(np.array(ellipse5_x), np.array(ellipse5_y))
-               e5p_a=(int(ellipse5_param[0]),int(ellipse5_param[1])) #radius
-               e5p_c=(int(ellipse5_param[2]),int(ellipse5_param[3])) #centre preadjusted for original image
-               e5p_phi=ellipse5_param[4]*180/math.pi   #angle converted to degrees
-               image = cv2.ellipse(image, e5p_c, e5p_a, e5p_phi, startAngle, endAngle, color, thickness)
-            except:
-               pass
-            try:
-               ellipse6_param=self.fit_ellipse(np.array(ellipse6_x), np.array(ellipse6_y))
-               e6p_a=(int(ellipse6_param[0]),int(ellipse6_param[1])) #radius
-               e6p_c=(int(ellipse6_param[2]),int(ellipse6_param[3])) #centre preadjusted for original image
-               e6p_phi=ellipse6_param[4]*180/math.pi   #angle converted to degrees
-               image = cv2.ellipse(image, e6p_c, e6p_a, e6p_phi, startAngle, endAngle, color, thickness)
-            except:
-               pass
-            try:
-               ellipse7_param=self.fit_ellipse(np.array(ellipse7_x), np.array(ellipse7_y))
-               e7p_a=(int(ellipse7_param[0]),int(ellipse7_param[1])) #radius
-               e7p_c=(int(ellipse7_param[2]),int(ellipse7_param[3])) #centre preadjusted for original image
-               e7p_phi=ellipse7_param[4]*180/math.pi   #angle converted to degrees          
-               image = cv2.ellipse(image, e7p_c, e7p_a, e7p_phi, startAngle, endAngle, color, thickness)
-            except:
-               pass
-            
-            #Save image with ellipses fitted
-            kerCirclesOutputPath = self.output_directory+"/Graphs/Ker_Out.png"
-            cv2.imwrite(kerCirclesOutputPath,image)
-            
-            #Plot data
-            xspacing=[1,2,3,4,5,6,7]
-            fig, axs = plt.subplots(2, 2)
-            axs[0, 0].scatter(xspacing, meanRadii)
-            axs[0, 0].set_title('Keratometer Rings Radii')
-            axs[0, 0].set_xlabel("Keratometer Ring")
-            axs[0, 0].set_ylabel("Radii (mm)")
-            axs[1, 0].scatter(powerScaleAdjusted, cornealPower)
-            axs[1, 0].set_title('Keratometer Rings Corneal Power')
-            axs[1, 0].set_xlabel("Keratometer Ring Power Scale")
-            axs[1, 0].set_ylabel("Corneal Power (D)")
-
-            x = data['X']
-            y=data['Y']
-            z=data['Power']
-
-            n=500
-            xlin= np.linspace((x.min()), (x.max()), n)
-            ylin= np.linspace((y.min()), (y.max()), n)
-            X, Y = np.meshgrid(xlin, ylin)
- 
-            Z= griddata((x,y),z,(X,Y))
-
-            heatMap = axs[0, 1].pcolor(X,Y,Z, shading='auto',cmap='jet')
-            fig.colorbar(heatMap, ax=axs[0, 1])
-            heatMap = axs[0, 1].set_title('Topographical Map of the Cornea')
-            heatMap = axs[0, 1].tick_params(which = "both", left=False,bottom=False,labelleft=False,labelbottom=False)
-
-            image = plt.imread(self.output_directory+"/Graphs/Ker_Out.png")  
-            axs[1, 1].imshow(image)
-            axs[1, 1].set_title('Keratometer Rings')
-            axs[1, 1].tick_params(which = "both", left=False,bottom=False,labelleft=False,labelbottom=False)
-            fig.suptitle("Corneal Topography Output:\nMean Corneal Power: "+f'{(meanPower):.1f}'+" D")
-            fig.tight_layout()
-            fig.savefig(self.output_directory+"/Graphs/Corneal Topography Results.png")
-            fig.clf()
-
-            #Remake individual graphs
-            plt.scatter(xspacing, meanRadii)
-            plt.title('Keratometer Rings Radii')
-            plt.xlabel("Keratometer Ring")
-            plt.ylabel("Radii (mm)")
-            plt.savefig(self.output_directory+"/Graphs/Keratometer Rings Radii.png")
-            fig.clf()
-
-            plt.scatter(powerScaleAdjusted, cornealPower)
-            plt.title('Keratometer Rings Corneal Power')
-            plt.xlabel("Keratometer Ring Power Scale")
-            plt.ylabel("Corneal Power (D)")
-            plt.savefig(self.output_directory+"/Graphs/Keratometer Rings Corneal Power.png")
-            fig.clf()
-
-            plt.pcolor(X,Y,Z, shading='auto',cmap='jet')
-            plt.colorbar()
-            plt.title('Topographical Map of the Cornea')
-            plt.tick_params(which = "both", left=False,bottom=False,labelleft=False,labelbottom=False)
-            plt.savefig(self.output_directory+"/Graphs/Topographical Map of the Cornea.png")
-
-            #Add ring data to CSV
-            space=[np.nan]*data.shape[0]
-            ringNumber=[np.nan]*data.shape[0]
-            ringRadii=[np.nan]*data.shape[0]
-            ringPower=[np.nan]*data.shape[0]
-
-            for i in range (0,7):
-               ringNumber[i]=i+1
-               ringRadii[i]=meanRadii[i]
-               ringPower[i]=cornealPower[i]
-
-            data["_"]=space
-            data["Ring Number"]=ringNumber
-            data["Ring Radii"]=ringRadii
-            data["Ring Corneal Power"]=ringPower
-            data.to_csv(kerIJResultsPath,index=False)
-            
-            
-
-
-            self.out_queue.put("Finished PR:"+self.output_directory+"/Graphs*"+f'{(meanPower):.1f}')
-            self.image_analysis_active=False
-
    #Thread for the analysis of PR or PIPR data saved by the Image Analysis Thread
    def results_analysis_thread(self):
       while self.running:
          self.sleep()
-         if self.results_analysis_active == True:
+         if self.results_analysis_active ==True and (self.analysis_type == "PR" or self.analysis_type == "PIPR"):
             #Read data from image analysis thread            
             data = pd.read_csv(self.output_directory+"/All_Results_Raw.csv")
             
@@ -532,7 +213,7 @@ class ThreadedClient:
             axisRatio=minorAxis.divide(majorAxis)
             imagingAngle= pd.Series(axisRatio).apply(lambda x: (math.sqrt((constants.quad_b-math.sqrt(constants.quad_b**2-4*constants.quad_a*(1-x)))/(2*constants.quad_a))))
             majorAxisFilled = pd.Series(majorAxis).fillna(limit=2, method='ffill')
-            time = pd.Series(labels).apply(lambda x: (x-(self.imageNumber-15))/constants.FRAME_RATE)
+            time = pd.Series(labels).apply(lambda x: (x-(self.imageNumber-15))/self.fps)
             
             #Filter based on derivative of imaging angle
             for i in range(4,197):  #+/-3
@@ -745,6 +426,333 @@ class ThreadedClient:
             #Ouputs graphs to GUI
             self.out_queue.put("Finished PR:"+self.output_directory+"/Graphs")
             self.results_analysis_active = False
+        
+         if self.results_analysis_active==True and self.analysis_type == "CT":
+            #Find centre of keratometer and assign a new coordinate system based off this centre
+            data = pd.read_csv(self.kerIJResultsPath)
+            x=data['X'].astype(float)
+            y=data['Y'].astype(float)
+            x_centre=x.mean()
+            y_centre=y.mean()
+            x_coord=x-x_centre
+            y_coord=y-y_centre
+            
+            #Find angle from new origin
+            ratio=abs(y_coord)/abs(x_coord)
+            angle = pd.Series(ratio).apply(lambda x: math.atan(x)*180/math.pi)
+
+            #Adjust angle to 0 to 360
+            for i in range (0,len(x)):
+               if x_coord[i]>=0 and y_coord[i]<0:
+                        angle[i]=360-angle[i]
+               if x_coord[i]<0:
+                     if y_coord[i]<0:
+                        angle[i]=180+angle[i]
+                     elif y_coord[i]>0:
+                        angle[i]=180-angle[i]
+
+            #Find distances from centre
+            x_coord_sq= pd.Series(x_coord).apply(lambda x: x**2)
+            y_coord_sq= pd.Series(y_coord).apply(lambda x: x**2)
+            dist_sq=x_coord_sq+y_coord_sq
+            dist= pd.Series(dist_sq).apply(lambda x: x**0.5)
+
+            #Drop uneeded data from results
+            try:
+               data.drop(['Label','Area', 'Major', 'Minor', 'Angle'], axis = 1, inplace = True)
+            except:
+               pass
+            data["Distance"]=dist
+            data["Ker Angle"]=angle
+            data = data.sort_values(by=['Ker Angle','Distance'])
+            data.to_csv(self.kerIJResultsPath,index=False)
+            data = pd.read_csv(self.kerIJResultsPath)
+            kerAngle=data["Ker Angle"]
+   
+            #Group by angle
+            average=0
+            total = 0
+            count=0
+            angleGroup=[0]*len(x)
+            angleGroupNumber=1
+            for i in range (0,len(x)):
+               total+=kerAngle[i]
+               count+=1
+               average=total/count
+               if abs(kerAngle[i]-average)>10:
+                     total=kerAngle[i]
+                     count=1
+                     angleGroupNumber+=1
+                     angleGroup[i]=angleGroupNumber   
+               else:
+                  angleGroup[i]=angleGroupNumber    
+            
+            data['Angle Group']=angleGroup
+            data = data.sort_values(by=['Angle Group','Distance'])
+            data.to_csv(self.kerIJResultsPath,index=False)
+            data = pd.read_csv(self.kerIJResultsPath)
+
+            #Remove close data points that are at same approximate angle
+            for i in range (1,len(x)):
+               if abs(data['Distance'][i]-data['Distance'][i-1])<3:
+                  data['Distance'][i-1]=np.nan
+
+            #Sort by distance
+            data = data.sort_values(by=['Distance'])
+            data=data.dropna(0)
+            data.to_csv(self.kerIJResultsPath,index=False)
+            data = pd.read_csv(self.kerIJResultsPath)
+            points= (np.array(data["Distance"])).reshape(-1, 1)
+
+            #Cluster data to form 7 groups
+            kmeans= KMeans(init="k-means++",n_clusters=self.kerRings,n_init=20, max_iter=500)
+            kmeans.fit(points)
+            #print(kmeans.labels_)
+            data["Klabels"]=kmeans.labels_
+            data.to_csv(self.kerIJResultsPath,index=False)
+
+
+            #Rearranges k labels for 1 to 7 (The labels are not in ascendin order after kmeans). Calculates mean radii of each ring. Calculates spot power
+            powerCalcConstants = [[8.6546,6.5952, 5.3263,4.6349,4.0759,3.6618,3.3428],[0.0325,-0.0101,0.0219,0.0071,0.0182,0.0199,0.0134]]
+            num=data["Klabels"][0]
+            label=7
+            meanRadii=[0]*7
+            count=0
+            total=0
+            spotPower=[0]*(data.shape[0])
+            for i in range (0, data.shape[0]):
+               if data["Klabels"][i]!=num:
+                  num = data["Klabels"][i]
+                  label+=1
+
+                  meanRadii[label-8]=total/count
+                  count=0
+                  total=0
+               data["Klabels"][i]=label
+               total+=data["Distance"][i]
+               count+=1
+
+               spotPower[i]=(1.335-1) / ((powerCalcConstants[0][(label-7)] * (data["Distance"][i] / 152.0157) + powerCalcConstants[1][(label-7)])/1000)
+
+            #Calculate last mean radii (not computed in for loop)
+            label+=1
+            meanRadii[label-8]=total/count
+            
+            #Power calculation for keratometer rings based of mean radii
+            powerScaleAdjusted = [i/152.0157 for i in meanRadii]
+            cornealPower=[0]*7
+            cornealPower[0] = (1.335-1) / ((8.6546 * powerScaleAdjusted[0] + 0.0325)/1000)
+            cornealPower[1] = (1.335-1) / ((6.5952 * powerScaleAdjusted[1] - 0.0101)/1000)
+            cornealPower[2] = (1.335-1) / ((5.3263 * powerScaleAdjusted[2] + 0.0219)/1000)
+            cornealPower[3] = (1.335-1) / ((4.6349 * powerScaleAdjusted[3] + 0.0071)/1000)
+            cornealPower[4] = (1.335-1) / ((4.0759 * powerScaleAdjusted[4] + 0.0182)/1000)
+            cornealPower[5] = (1.335-1) / ((3.6618 * powerScaleAdjusted[5] + 0.0199)/1000)
+            cornealPower[6] = (1.335-1) / ((3.3428 * powerScaleAdjusted[6] + 0.0134)/1000)
+            meanPower=np.mean(cornealPower)
+
+            #Convert radii to mm
+            meanRadii = np.array(meanRadii)
+            meanRadii = meanRadii/constants.pupil_scale
+
+            #Edit CSV
+            data["Klabels"]=data["Klabels"]-6
+            data["Power"]=spotPower
+            data.drop(['Angle Group'], axis = 1, inplace = True)
+            data.to_csv(self.kerIJResultsPath,index=False)
+
+            #Initialise arrays for ellipse points
+            ellipse1_x=[]
+            ellipse1_y=[]
+            ellipse2_x=[]
+            ellipse2_y=[]
+            ellipse3_x=[]
+            ellipse3_y=[]
+            ellipse4_x=[]
+            ellipse4_y=[]
+            ellipse5_y=[]    
+            ellipse5_x=[]
+            ellipse6_y=[]
+            ellipse6_x=[]
+            ellipse7_y=[]
+            ellipse7_x=[]
+
+            #Add x and y coordinates for ellipses (offset by original roi crop)
+            for i in range (0,data.shape[0]):
+               if data['Klabels'][i]==1:
+                     ellipse1_x.append(data['X'][i]+self.roi[0])
+                     ellipse1_y.append(data['Y'][i]+self.roi[1])
+               elif data['Klabels'][i]==2:
+                     ellipse2_x.append(data['X'][i]+self.roi[0])
+                     ellipse2_y.append(data['Y'][i]+self.roi[1])
+               elif data['Klabels'][i]==3:
+                     ellipse3_x.append(data['X'][i]+self.roi[0])
+                     ellipse3_y.append(data['Y'][i]+self.roi[1])
+               elif data['Klabels'][i]==4:
+                     ellipse4_x.append(data['X'][i]+self.roi[0])
+                     ellipse4_y.append(data['Y'][i]+self.roi[1])
+               elif data['Klabels'][i]==5:
+                     ellipse5_x.append(data['X'][i]+self.roi[0])
+                     ellipse5_y.append(data['Y'][i]+self.roi[1])
+               elif data['Klabels'][i]==6:
+                     ellipse6_x.append(data['X'][i]+self.roi[0])
+                     ellipse6_y.append(data['Y'][i]+self.roi[1])
+               elif data['Klabels'][i]==7:
+                     ellipse7_x.append(data['X'][i]+self.roi[0])
+                     ellipse7_y.append(data['Y'][i]+self.roi[1])
+
+
+
+            #Load original images and try to fit and plot 7 ellipses
+            image = cv2.imread(self.fileName)
+            startAngle = 0.
+            endAngle = 360
+            # Red color in BGR
+            color = (0, 0, 255)
+            # Line thickness of 2 px
+            thickness = 2
+            
+            try:
+               ellipse1_param =self.fit_ellipse(np.array(ellipse1_x), np.array(ellipse1_y))
+               e1p_a=(int(ellipse1_param[0]),int(ellipse1_param[1])) #radius ellipse 1 parameters _ axes
+               e1p_c=(int(ellipse1_param[2]),int(ellipse1_param[3])) #centre preadjusted for original image ellipse 1 parameters _ centre
+               e1p_phi=ellipse1_param[4]*180/math.pi   #angle converted to degrees ellipse 1 parameters _ phi
+               image = cv2.ellipse(image, e1p_c, e1p_a, e1p_phi, startAngle, endAngle, color, thickness)
+            except:
+               pass
+            try:
+               ellipse2_param=self.fit_ellipse(np.array(ellipse2_x), np.array(ellipse2_y))
+               e2p_a=(int(ellipse2_param[0]),int(ellipse2_param[1])) #radius
+               e2p_c=(int(ellipse2_param[2]),int(ellipse2_param[3])) #centre preadjusted for original image
+               e2p_phi=ellipse2_param[4]*180/math.pi   #angle converted to degrees
+               image = cv2.ellipse(image, e2p_c, e2p_a, e2p_phi, startAngle, endAngle, color, thickness)   
+            except:
+               pass
+            try:
+               ellipse3_param=self.fit_ellipse(np.array(ellipse3_x), np.array(ellipse3_y))
+               e3p_a=(int(ellipse3_param[0]),int(ellipse3_param[1])) #radius
+               e3p_c=(int(ellipse3_param[2]),int(ellipse3_param[3])) #centre preadjusted for original image
+               e3p_phi=ellipse3_param[4]*180/math.pi   #angle converted to degrees
+               image = cv2.ellipse(image, e3p_c, e3p_a, e3p_phi, startAngle, endAngle, color, thickness)
+            except:
+               pass
+            try:
+               ellipse4_param=self.fit_ellipse(np.array(ellipse4_x), np.array(ellipse4_y))
+               e4p_a=(int(ellipse4_param[0]),int(ellipse4_param[1])) #radius
+               e4p_c=(int(ellipse4_param[2]),int(ellipse4_param[3])) #centre preadjusted for original image
+               e4p_phi=ellipse4_param[4]*180/math.pi   #angle converted to degrees
+               image = cv2.ellipse(image, e4p_c, e4p_a, e4p_phi, startAngle, endAngle, color, thickness)
+            except:
+               pass
+            try:
+               ellipse5_param=self.fit_ellipse(np.array(ellipse5_x), np.array(ellipse5_y))
+               e5p_a=(int(ellipse5_param[0]),int(ellipse5_param[1])) #radius
+               e5p_c=(int(ellipse5_param[2]),int(ellipse5_param[3])) #centre preadjusted for original image
+               e5p_phi=ellipse5_param[4]*180/math.pi   #angle converted to degrees
+               image = cv2.ellipse(image, e5p_c, e5p_a, e5p_phi, startAngle, endAngle, color, thickness)
+            except:
+               pass
+            try:
+               ellipse6_param=self.fit_ellipse(np.array(ellipse6_x), np.array(ellipse6_y))
+               e6p_a=(int(ellipse6_param[0]),int(ellipse6_param[1])) #radius
+               e6p_c=(int(ellipse6_param[2]),int(ellipse6_param[3])) #centre preadjusted for original image
+               e6p_phi=ellipse6_param[4]*180/math.pi   #angle converted to degrees
+               image = cv2.ellipse(image, e6p_c, e6p_a, e6p_phi, startAngle, endAngle, color, thickness)
+            except:
+               pass
+            try:
+               ellipse7_param=self.fit_ellipse(np.array(ellipse7_x), np.array(ellipse7_y))
+               e7p_a=(int(ellipse7_param[0]),int(ellipse7_param[1])) #radius
+               e7p_c=(int(ellipse7_param[2]),int(ellipse7_param[3])) #centre preadjusted for original image
+               e7p_phi=ellipse7_param[4]*180/math.pi   #angle converted to degrees          
+               image = cv2.ellipse(image, e7p_c, e7p_a, e7p_phi, startAngle, endAngle, color, thickness)
+            except:
+               pass
+            
+            #Save image with ellipses fitted
+            kerCirclesOutputPath = self.output_directory+"/Graphs/Ker_Out.png"
+            cv2.imwrite(kerCirclesOutputPath,image)
+            
+            #Plot data
+            xspacing=[1,2,3,4,5,6,7]
+            fig, axs = plt.subplots(2, 2)
+            axs[0, 0].scatter(xspacing, meanRadii)
+            axs[0, 0].set_title('Keratometer Rings Radii')
+            axs[0, 0].set_xlabel("Keratometer Ring")
+            axs[0, 0].set_ylabel("Radii (mm)")
+            axs[1, 0].scatter(powerScaleAdjusted, cornealPower)
+            axs[1, 0].set_title('Keratometer Rings Corneal Power')
+            axs[1, 0].set_xlabel("Keratometer Ring Power Scale")
+            axs[1, 0].set_ylabel("Corneal Power (D)")
+
+            x = data['X']
+            y=data['Y']
+            z=data['Power']
+
+            n=500
+            xlin= np.linspace((x.min()), (x.max()), n)
+            ylin= np.linspace((y.min()), (y.max()), n)
+            X, Y = np.meshgrid(xlin, ylin)
+ 
+            Z= griddata((x,y),z,(X,Y))
+
+            heatMap = axs[0, 1].pcolor(X,Y,Z, shading='auto',cmap='jet')
+            fig.colorbar(heatMap, ax=axs[0, 1])
+            heatMap = axs[0, 1].set_title('Topographical Map of the Cornea')
+            heatMap = axs[0, 1].tick_params(which = "both", left=False,bottom=False,labelleft=False,labelbottom=False)
+
+            image = plt.imread(self.output_directory+"/Graphs/Ker_Out.png")  
+            axs[1, 1].imshow(image)
+            axs[1, 1].set_title('Keratometer Rings')
+            axs[1, 1].tick_params(which = "both", left=False,bottom=False,labelleft=False,labelbottom=False)
+            fig.suptitle("Corneal Topography Output:\nMean Corneal Power: "+f'{(meanPower):.1f}'+" D")
+            fig.tight_layout()
+            fig.savefig(self.output_directory+"/Graphs/Corneal Topography Results.png")
+            fig.clf()
+
+            #Remake individual graphs
+            plt.scatter(xspacing, meanRadii)
+            plt.title('Keratometer Rings Radii')
+            plt.xlabel("Keratometer Ring")
+            plt.ylabel("Radii (mm)")
+            plt.savefig(self.output_directory+"/Graphs/Keratometer Rings Radii.png")
+            fig.clf()
+
+            plt.scatter(powerScaleAdjusted, cornealPower)
+            plt.title('Keratometer Rings Corneal Power')
+            plt.xlabel("Keratometer Ring Power Scale")
+            plt.ylabel("Corneal Power (D)")
+            plt.savefig(self.output_directory+"/Graphs/Keratometer Rings Corneal Power.png")
+            fig.clf()
+
+            plt.pcolor(X,Y,Z, shading='auto',cmap='jet')
+            plt.colorbar()
+            plt.title('Topographical Map of the Cornea')
+            plt.tick_params(which = "both", left=False,bottom=False,labelleft=False,labelbottom=False)
+            plt.savefig(self.output_directory+"/Graphs/Topographical Map of the Cornea.png")
+
+            #Add ring data to CSV
+            space=[np.nan]*data.shape[0]
+            ringNumber=[np.nan]*data.shape[0]
+            ringRadii=[np.nan]*data.shape[0]
+            ringPower=[np.nan]*data.shape[0]
+
+            for i in range (0,7):
+               ringNumber[i]=i+1
+               ringRadii[i]=meanRadii[i]
+               ringPower[i]=cornealPower[i]
+
+            data["_"]=space
+            data["Ring Number"]=ringNumber
+            data["Ring Radii"]=ringRadii
+            data["Ring Corneal Power"]=ringPower
+            data.to_csv(self.kerIJResultsPath,index=False)
+            
+            
+
+
+            self.out_queue.put("Finished PR:"+self.output_directory+"/Graphs*"+f'{(meanPower):.1f}')
+            self.results_analysis_active=False
+
 
    #Thread for converting a video input into frames and saves to the otuput folder as a .png 
    def video_to_frames_thread(self):
@@ -757,6 +765,12 @@ class ThreadedClient:
             count = 0
             print ("Converting video..\n")
             # Start converting the video
+
+            try:
+               self.fps = int(cap.get(cv2.CAP_PROP_FPS))
+            except:
+               pass
+
 
             while cap.isOpened():
                # Extract the frame
